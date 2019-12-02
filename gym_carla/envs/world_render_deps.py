@@ -307,11 +307,13 @@ class CameraManager(object):
         image.convert(cc.Raw)
         array = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
         array = np.reshape(array, (image.height, image.width, 4))
+        # array = np.reshape(array, (image.height, image.width, 4))
 
         array = array[:, :, :3]
-        self._current_agent_observation = array
-
         array = array[:, :, ::-1]
+
+        # TODO: Visualize this and make sure it actually reflects the pic properly
+        self._current_agent_observation = np.reshape( array, (image.width, image.height, 3))
 
         # Do we render this some day ?
         if self._render_mode == 'agent':
