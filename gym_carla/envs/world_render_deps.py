@@ -62,7 +62,7 @@ class CollisionSensor(object):
         impulse = event.normal_impulse
         intensity = math.sqrt(impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2)
         self.history.append((event.frame, intensity))
-        if len(self.history) > 4000:
+        if len(self.history) > 1000:
             self.history.pop(0)
 
 # ==============================================================================
@@ -150,6 +150,7 @@ class CameraManager(object):
 
         # Passing the ref for the current observation to be written into the env directy
         self._current_agent_observation = None
+        self._current_lidar_observation = None
         self._current_display_observation = None
 
         world = self._parent.get_world()
@@ -197,6 +198,17 @@ class CameraManager(object):
                 attach_to=self._parent
             )
             self._display_cam_sensor.listen( lambda image: CameraManager._parse_display_cam_image(weak_self, image))
+
+        # Lidar sensor. Skip it for now. Using pics only
+        # agent_lidar_bp = bp_library.find( 'sensor.lidar.ray_cast')
+        # agent_lidar_bp.set_attribute( 'range', str( '15'))
+
+        # self._agent_lidar_sensor = self._parent.get_world().spawn_actor(
+        #     agent_lidar_bp,
+        #     carla.Transform(carla.Location(x=.0, z=.0)),
+        #     attach_to=self._parent
+        # )
+        # self._agent_lidar_sensor.listen( lambda data: CameraManager._parse_lidar_data( weak_self, data))
 
     def toggle_camera(self):
         self.transform_index = (self.transform_index + 1) % len(self._camera_transforms)
@@ -286,6 +298,7 @@ class CameraManager(object):
             print( "# DEBUG: Saving img to disk")
             image.save_to_disk('_out/%08d' % image.frame)
 
+    @staticmethod
     def _parse_front_cam_image(weak_self, image):
         self = weak_self()
         if not self:
@@ -308,6 +321,33 @@ class CameraManager(object):
         if self.recording:
             print( "# DEBUG: Saving img to disk")
             image.save_to_disk('_out/%08d' % image.frame)
+
+    @staticmethod
+    def _parse_lidar_data( weak_ref, image):
+        self = weak_ref()
+        if not self:
+            return
+
+        points = np.frombuffer(image.raw_data, dtype=np.dtype('f4'))
+        points = np.reshape(points, (int(points.shape[0] / 3), 3))
+        lidar_data = np.array(points[:, :2])
+        dim = (self._camera_man_args['agent_image_width'],
+            self._camera_man_args['agent_image_height'])
+        lidar_data *= min(dim) / 100.0
+        lidar_data += (0.5 * dim[0], 0.5 * dim[1])
+        lidar_data = np.fabs(lidar_data)  # pylint: disable=E1111
+        lidar_data = lidar_data.astype(np.int32)
+        lidar_data = np.reshape(lidar_data, (-1, 2))
+        lidar_img_size = (dim[0], dim[1], 3)
+        lidar_img = np.zeros(lidar_img_size)
+        lidar_img[tuple(lidar_data.T)] = (255, 255, 255)
+
+        # Loading lidar data to the corresponding spot
+        self._current_lidar_observation = lidar_img
+
+        if self._render_mode == 'agent_lidar':
+            self.surface = pygame.surfarray.make_surface(lidar_img)
+
 # ==============================================================================
 # -- World ---------------------------------------------------------------------
 # ==============================================================================
@@ -340,6 +380,9 @@ class World(object):
         self._world_args = world_args # Required to configure the camera manager down the line
         self._camera_man_args = world_args[ 'camera_man_args']
 
+        self._seed = world_args['seed']
+        self.set_seed()
+
         # self.world.set_timeout( 2.0)
         self.restart()
 
@@ -347,6 +390,13 @@ class World(object):
             self.world.on_tick(self.hud.on_world_tick)
         self.recording_enabled = False
         self.recording_start = 0
+
+    def set_seed( self, seed = None):
+        if seed is not None:
+            self._seed = seed
+
+        random.seed( self._seed)
+        np.random.seed( self._seed)
 
     def restart(self):
         # Keep same camera config if the camera manager exists.
@@ -388,8 +438,9 @@ class World(object):
         # Custom: Attaching RGB front camera to agent
         # Set up the sensors.
         # TODO: Remove useless sensors for RL
+        self.collision_sensor = CollisionSensor(self.player, self.hud)
+
         if self._render_mode == 'human':
-            self.collision_sensor = CollisionSensor(self.player, self.hud)
             self.lane_invasion_sensor = LaneInvasionSensor(self.player, self.hud)
             self.gnss_sensor = GnssSensor(self.player)
 
@@ -402,6 +453,9 @@ class World(object):
         # Do not render if hud is not created: this probably means either we are not rendering or, rendering only the agent's view
         if self.hud is not None:
             self.hud.notification(actor_type)
+
+        # TODO: Parametrize weather later
+        self.world.set_weather( carla.WeatherParameters.Default)
 
     def next_weather(self, reverse=False):
         self._weather_index += -1 if reverse else 1
@@ -421,12 +475,19 @@ class World(object):
 
     def destroy_sensors(self):
         if hasattr( self.camera_manager, '_display_cam_sensor'):
+            # print( "# DEBUG: Destroing diplay cam sensor")
             if self.camera_manager._display_cam_sensor is not None:
                 self.camera_manager._display_cam_sensor.destroy()
 
         if hasattr( self.camera_manager, '_agent_front_cam_sensor'):
+            # print( "# DEBUG: Destroing agent cam sensor")
             if self.camera_manager._agent_front_cam_sensor is not None:
                 self.camera_manager._agent_front_cam_sensor.destroy()
+
+        if hasattr( self.camera_manager, '_agent_lidar_sensor'):
+            # print( "# DEBUG: Destroing agent lidar sensor")
+            if self.camera_manager._agent_lidar_sensor is not None:
+                self.camera_manager._agent_lidar_sensor.destroy()
 
         # TODO: Remove the fopllowing lines if the corresponding sensor is not used
         # Namely LaneInvasion and GNSS
